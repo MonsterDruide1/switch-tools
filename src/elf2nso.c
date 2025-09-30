@@ -61,9 +61,28 @@ uint8_t* ReadEntireFile(const char* fn, size_t* len_out) {
 }
 
 int main(int argc, char* argv[]) {
-    if (argc != 3) {
-        fprintf(stderr, "%s <elf-file> <nso-file>\n", argv[0]);
+    if (argc != 3 && argc != 4) {
+        fprintf(stderr, "%s <elf-file> <nso-file> [<build-id>]\n", argv[0]);
         return EXIT_FAILURE;
+    }
+
+    char use_custom_build_id = 0;
+    u8 custom_build_id[0x20];
+    if (argc == 4) {
+        if (strlen(argv[3]) != 0x40) {
+            fprintf(stderr, "Build ID must be exactly 0x40 hex characters!\n");
+            return EXIT_FAILURE;
+        }
+        use_custom_build_id = 1;
+        for (size_t i = 0; i < 0x20; i++) {
+            char byte_str[3] = { argv[3][i * 2], argv[3][i * 2 + 1], 0 };
+            char* endptr;
+            custom_build_id[i] = (u8)strtoul(byte_str, &endptr, 16);
+            if (*endptr != 0) {
+                fprintf(stderr, "Build ID must be exactly 0x40 hex characters!\n");
+                return EXIT_FAILURE;
+            }
+        }
     }
 
     NsoHeader nso_hdr;
@@ -158,23 +177,27 @@ int main(int argc, char* argv[]) {
         file_off += comp_sz[i];
     }
     
-    /* Iterate over sections to find build id. */
-    size_t cur_sect_hdr_ofs = hdr->e_shoff;
-    for (unsigned int i = 0; i < hdr->e_shnum; i++) {
-        Elf64_Shdr *cur_shdr = (Elf64_Shdr *)(elf + cur_sect_hdr_ofs);
-        if (cur_shdr->sh_type == SHT_NOTE) {
-            Elf64_Nhdr *note_hdr = (Elf64_Nhdr *)(elf + cur_shdr->sh_offset);
-            u8 *note_name = (u8 *)((uintptr_t)note_hdr + sizeof(Elf64_Nhdr));
-            u8 *note_desc = note_name + note_hdr->n_namesz;
-            if (note_hdr->n_type == NT_GNU_BUILD_ID && note_hdr->n_namesz == 4 && memcmp(note_name, "GNU\x00", 4) == 0) {
-                size_t build_id_size = note_hdr->n_descsz;
-                if (build_id_size > 0x20) {
-                    build_id_size = 0x20;
+    if (!use_custom_build_id) {
+        /* Iterate over sections to find build id. */
+        size_t cur_sect_hdr_ofs = hdr->e_shoff;
+        for (unsigned int i = 0; i < hdr->e_shnum; i++) {
+            Elf64_Shdr *cur_shdr = (Elf64_Shdr *)(elf + cur_sect_hdr_ofs);
+            if (cur_shdr->sh_type == SHT_NOTE) {
+                Elf64_Nhdr *note_hdr = (Elf64_Nhdr *)(elf + cur_shdr->sh_offset);
+                u8 *note_name = (u8 *)((uintptr_t)note_hdr + sizeof(Elf64_Nhdr));
+                u8 *note_desc = note_name + note_hdr->n_namesz;
+                if (note_hdr->n_type == NT_GNU_BUILD_ID && note_hdr->n_namesz == 4 && memcmp(note_name, "GNU\x00", 4) == 0) {
+                    size_t build_id_size = note_hdr->n_descsz;
+                    if (build_id_size > 0x20) {
+                        build_id_size = 0x20;
+                    }
+                    memcpy(nso_hdr.BuildId, note_desc, build_id_size);
                 }
-                memcpy(nso_hdr.BuildId, note_desc, build_id_size);
             }
+            cur_sect_hdr_ofs += hdr->e_shentsize;
         }
-        cur_sect_hdr_ofs += hdr->e_shentsize;
+    } else {
+        memcpy(nso_hdr.BuildId, custom_build_id, 0x20);
     }
 
     FILE* out = fopen(argv[2], "wb");
